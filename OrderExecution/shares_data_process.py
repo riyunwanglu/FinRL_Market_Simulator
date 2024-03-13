@@ -77,6 +77,24 @@ def _add_share_style(tensor_dicts, n_days=5, data_dir='./share_mkt_equ_daily_zho
         tensor_dict['neg_mkt_value'] = neg_mkt_values[i:j].mean()
     return tensor_dicts
 
+import chinese_calendar
+import datetime
+ 
+def get_tradeday(beg_date, end_date):
+    start = datetime.datetime.strptime(beg_date, '%Y%m%d') # 将字符串转换为datetime格式
+    end = datetime.datetime.strptime(end_date, '%Y%m%d')
+    # 获取指定范围内工作日列表
+    lst = chinese_calendar.get_workdays(start,end)
+    expt = []
+    # 找出列表中的周六，周日，并添加到空列表
+    for time in lst:
+        if time.isoweekday() == 6 or time.isoweekday() == 7:
+            expt.append(time)
+    # 将周六周日排除出交易日列表
+    for time in expt:
+        lst.remove(time)
+    date_list = [item.strftime('%Y%m%d') for item in lst] #列表生成式，strftime为转换日期格式
+    return date_list
 
 def get_trade_dates(beg_date: str = '2022.09.01', end_date: str = '2022.09.15') -> [str]:
     from ideadata.stock.trade_calendar import TradeCalendar
@@ -87,40 +105,37 @@ def get_trade_dates(beg_date: str = '2022.09.01', end_date: str = '2022.09.15') 
     return trade_dates
 
 
-def get_share_dicts_by_day(share_dir='./shares_data_by_day', share_symbol='000525_XSHE',
-                           beg_date='2022-09-01', end_date='2022-09-30',
+def get_share_dicts_by_day(share_dir='./shares_data_by_day', share_symbol='000525.sz',
+                           beg_date='20220901', end_date='20220930',
                            n_levels=5, device=None):
     if device is None:
         gpu_id = 0
         device = torch.device(f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu")
 
-    '''convert csv to tensor by day'''
-    if beg_date is None:
-        trade_dates = [csv_name[:-4]
-                       for csv_name in sorted(os.listdir(share_dir))
-                       if csv_name[-4:] == '.csv']
-    else:
-        try:
-            trade_dates = get_trade_dates(beg_date=beg_date, end_date=end_date)
-        except ModuleNotFoundError:
-            trade_dates = [csv_name[:-4] for csv_name in sorted(os.listdir(share_dir))
-                           if csv_name[-4:] == '.csv']
-            beg_id = len([trade_date for trade_date in trade_dates if trade_date < beg_date])
-            end_id = len([trade_date for trade_date in trade_dates if trade_date <= end_date])
-            trade_dates = trade_dates[beg_id:end_id]
+    '''convert feather to tensor by day'''
+    
+    trade_dates = get_tradeday(beg_date=beg_date, end_date=end_date)
 
     tensor_dicts = []
     for trade_date in trade_dates:
-        csv_path = f"{share_dir}/{share_symbol}/{trade_date}.csv"
-        tensor_dict = csv_to_tensor_dict(csv_path=csv_path, device=device, n_levels=n_levels)
+        ft_path = f"{share_dir}/{share_symbol}/{trade_date}/snapshot.ft"
+        tensor_dict = get_snapshot_tensor_dict(trade_date, ft_path=ft_path, device=device, n_levels=n_levels)
         tensor_dict['trade_date'] = trade_date
         tensor_dict['share_symbol'] = share_symbol
         tensor_dicts.append(tensor_dict)
     return tensor_dicts
 
-
-def csv_to_tensor_dict(csv_path: str, device, n_levels: int = 5):
-    df = pd.read_csv(csv_path)
+def get_snapshot_tensor_dict(trade_date:str, ft_path: str, device, n_levels: int = 5):
+    df = pd.read_feather(ft_path)
+    df = df.rename(columns = {'Time':'UpdateTime', 'Match':'LastPrice'})
+    # df['Volume'] = df['Volume'].diff()
+    # df['Turnover'] = df['Turnover'].diff()
+    filter1 = df['UpdateTime'] >= 93000000 
+    filter2 = df['UpdateTime'] <= 113000000
+    filter3 = df['UpdateTime'] >= 130000000 
+    filter4 = df['UpdateTime'] <= 150000000 
+    df = df[(filter1 & filter2) | (filter3 & filter4)]
+    df = df.drop_duplicates()
 
     def get_tensor(ary):
         return torch.tensor(ary, dtype=torch.float32, device=device)
@@ -133,10 +148,11 @@ def csv_to_tensor_dict(csv_path: str, device, n_levels: int = 5):
     '''找出超过3秒的时间间隔
     Find time intervals exceeding 3 seconds
     '''
-    df['UpdateTime'] = pd.to_datetime(df['UpdateTime'])  # 将字符串转换为 Pandas 时间戳对象
-    df['UpdateTime'] = df['UpdateTime'].apply(lambda x: x.timestamp())  # 将时间戳对象转换为 POSIX 时间戳（浮点数形式）
-    time_stamp = df['UpdateTime'].values
-    time_diffs = time_stamp[1:] - time_stamp[:-1]
+    # df['UpdateTime'] = pd.to_datetime(df['UpdateTime'].apply(lambda x : f'{trade_date} {x}'), format='%Y%m%d %H%M%S%f')  # 将字符串转换为 Pandas 时间戳对象
+    # df['UpdateTime'] = df['UpdateTime'].apply(lambda x: x.timestamp())  # 将时间戳对象转换为 POSIX 时间戳（浮点数形式）
+    # time_stamp = df['UpdateTime'].values
+    # time_diffs = time_stamp[1:] - time_stamp[:-1]
+    time_diffs = df['UpdateTime'].diff().values[1:]
 
     '''新建需要插值的所有row，更新 UpdateTime 用于排序
     Create new rows for all data points requiring interpolation and update the UpdateTime for sorting purposes
@@ -151,20 +167,22 @@ def csv_to_tensor_dict(csv_path: str, device, n_levels: int = 5):
     for j in range(4800 + 2 - len(df) - len(df_list)):
         # df.loc[-1, 'UpdateTime'] = df.loc[-1, 'UpdateTime'] + j * 3 + 3
         df_list.append(df.iloc[-1])
-    add_df = pd.concat(df_list, axis=1, ignore_index=True).T
+    if len(df_list) > 0:
+        add_df = pd.concat(df_list, axis=1, ignore_index=True).T
 
-    '''重建 pd.concat 操作后 column 丢失的 dtype'''
-    for column in df.columns:
-        add_df[column] = add_df[column].astype(df[column].dtype)
+        '''重建 pd.concat 操作后 column 丢失的 dtype'''
+        for column in df.columns:
+            add_df[column] = add_df[column].astype(df[column].dtype)
 
-    '''通过concat添加到原本的df里，根据 UpdateTime 进行排序，完成插值
-    Add the new rows to the original dataframe using concat, 
-    and sort the dataframe based on UpdateTime to complete the interpolation
-    '''
-    df = pd.concat((df, add_df))
+        '''通过concat添加到原本的df里，根据 UpdateTime 进行排序，完成插值
+        Add the new rows to the original dataframe using concat, 
+        and sort the dataframe based on UpdateTime to complete the interpolation
+        '''
+        df = pd.concat((df, add_df))
+        
     df.sort_values('UpdateTime')
     df.reset_index(drop=True)
-    assert df.shape == (4800 + 2, 27)
+    assert df.shape[0] == 4800 + 2
 
     """get data for building tensor_dict"""
     '''get delta volume'''
@@ -173,12 +191,12 @@ def csv_to_tensor_dict(csv_path: str, device, n_levels: int = 5):
     torch.nan_to_num_(volume, nan=0)
 
     '''get delta turnover (value)'''
-    value = get_tensor(df['turnover'].values)
+    value = get_tensor(df['Turnover'].values)
     value[1:] = torch.diff(value, n=1)  # delta turnover (value)
     torch.nan_to_num_(value, nan=0)
 
     '''get last price'''
-    price = get_tensor(df['LastPrice'].fillna(method='ffill').values)  # last price
+    price = get_tensor(df['LastPrice'].ffill().values)  # last price
     price[price == 0] = price[price > 0][-1]
 
     '''fill nan in ask_prices and ask_volumes'''
@@ -187,7 +205,7 @@ def csv_to_tensor_dict(csv_path: str, device, n_levels: int = 5):
     for i in range(n_levels):
         prev_price = ask_prices[i - 1] if i > 0 else price
         ask_prices[i] = fill_zero_and_nan_with_tensor(ask_prices[i], prev_price + 0.01)
-    ask_volumes = get_tensor(df[[f'AskVolume{i}' for i in range(1, n_levels + 1)]].values).T
+    ask_volumes = get_tensor(df[[f'AskVol{i}' for i in range(1, n_levels + 1)]].values).T
     torch.nan_to_num_(ask_volumes, nan=0)
 
     '''fill nan in bid_prices and bid_volumes'''
@@ -196,7 +214,7 @@ def csv_to_tensor_dict(csv_path: str, device, n_levels: int = 5):
     for i in range(n_levels):
         prev_price = bid_prices[i - 1] if i > 0 else price
         bid_prices[i] = fill_zero_and_nan_with_tensor(bid_prices[i], prev_price - 0.01)
-    bid_volumes = get_tensor(df[[f'BidVolume{i}' for i in range(1, n_levels + 1)]].values).T
+    bid_volumes = get_tensor(df[[f'BidVol{i}' for i in range(1, n_levels + 1)]].values).T
     torch.nan_to_num_(bid_volumes, nan=0)
 
     return {'price': price, 'volume': volume, 'value': value,
@@ -229,7 +247,7 @@ def test_csv_to_tensor_dict():
 
     csv_path = f"{share_dir}/{share_symbol}/{trade_date}.csv"
     device = torch.device(f"cuda:{gpu_id}" if (torch.cuda.is_available() and (gpu_id >= 0)) else "cpu")
-    tensor_dict = csv_to_tensor_dict(csv_path=csv_path, device=device, n_levels=n_levels)
+    tensor_dict = get_snapshot_tensor_dict(csv_path=csv_path, device=device, n_levels=n_levels)
     for k, v in tensor_dict.items():
         print(f"{k} {v.shape}")
     assert tensor_dict['price'].shape == (4800 + 2,)

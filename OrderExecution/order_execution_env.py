@@ -86,7 +86,7 @@ class OrderExecutionVecEnv:
         self.total_quantity = torch.zeros(0)  # 订单执行的目标成交量（希望在一天内达成这个目标成交量）
 
         self.data_dicts = self.load_share_data_dicts(
-            data_dir='./shares_data_by_day', share_name=share_name,
+            data_dir='./data', share_name=share_name,
             beg_date=beg_date, end_date=end_date)
 
         '''reset'''
@@ -105,11 +105,11 @@ class OrderExecutionVecEnv:
         self.if_discrete = False
 
         '''function for vmap'''
-        self.inplace_cash_quantity = vmap(
+        self.inplace_cash_quantity = torch.vmap(
             func=self._inplace_cash_quantity, in_dims=(0, 0, 0, None, None), out_dims=0
         )
 
-        self._get_state = vmap(
+        self._get_state = torch.vmap(
             func=lambda remain_quantity, quantity, remain_step_rate, last_price, tech_factor:
             torch.hstack((remain_quantity, quantity, remain_step_rate, last_price, tech_factor)),
             in_dims=(0, 0, None, None, None), out_dims=0
@@ -280,18 +280,17 @@ class OrderExecutionVecEnv:
             get_ts_trends(v_adj_spreads[3] * 2 ** 6, win_size=12, gap_size=8),
             get_ts_trends(v_adj_spreads[4] * 2 ** 6, win_size=12, gap_size=12),
         ), dim=1)
-        torch.nan_to_num_(tech_factors, nan=0.0, posinf=0.0, neginf=0.0)
+        return torch.nan_to_num_(tech_factors, nan=0.0, posinf=0.0, neginf=0.0)
         return tech_factors
 
     def load_share_data_dicts(self, data_dir="./data",
                               share_name: str = '000768_XSHE',
-                              beg_date='2022-09-01',
-                              end_date='2022-09-30'):
-        assert share_name in {'000768_XSHE', '000685_XSHE'}
-        share_dir = f"{data_dir}/{share_name}"
-        share_dicts = get_share_dicts_by_day(share_dir=share_dir, share_name=share_name,
+                              beg_date='20220901',
+                              end_date='20220930'):
+        # assert share_name in {'000768_XSHE', '000685_XSHE'}
+        share_dicts = get_share_dicts_by_day(share_dir=data_dir, share_symbol=share_name,
                                              beg_date=beg_date, end_date=end_date,
-                                             n_levels=self.num_levels, n_days=5, device=self.device)
+                                             n_levels=self.num_levels, device=self.device)
         for share_dict in share_dicts:
             for key, value in share_dict.items():
                 if isinstance(value, torch.Tensor):
@@ -301,7 +300,7 @@ class OrderExecutionVecEnv:
         print('| OrderExecutionEnv data pre processing:', share_name)
 
         for i, share_dict in enumerate(share_dicts):
-            share_name = share_dict['share_name']
+            # share_name = share_dict['share_name']
             trade_date = share_dict['trade_date']
             print(end=f'{trade_date}  ')
             print() if i % 8 == 7 else None
@@ -441,11 +440,11 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
                               share_name: str = '000768_XSHE',
                               beg_date='2022-09-01',
                               end_date='2022-09-30'):
-        assert share_name in {'000768_XSHE', '000685_XSHE'}
+        # assert share_name in {'000768_XSHE', '000685_XSHE'}
         share_dir = f"{data_dir}/{share_name}"
-        share_dicts = get_share_dicts_by_day(share_dir=share_dir, share_name=share_name,
+        share_dicts = get_share_dicts_by_day(share_dir=share_dir, share_symbol=share_name,
                                              beg_date=beg_date, end_date=end_date,
-                                             n_levels=self.num_levels, n_days=5, device=self.device)
+                                             n_levels=self.num_levels, device=self.device)
         for share_dict in share_dicts:
             for key, value in share_dict.items():
                 if isinstance(value, torch.Tensor):
