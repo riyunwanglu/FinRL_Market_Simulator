@@ -118,70 +118,20 @@ def get_share_dicts_by_day(share_dir='./shares_data_by_day', share_symbol='00052
 
     tensor_dicts = []
     for trade_date in trade_dates:
-        ft_path = f"{share_dir}/{share_symbol}/{trade_date}/snapshot.ft"
-        tensor_dict = get_snapshot_tensor_dict(trade_date, ft_path=ft_path, device=device, n_levels=n_levels)
+        file_path = f"{share_dir}/{share_symbol}/{trade_date}/snapshot.csv"
+        tensor_dict = get_snapshot_tensor_dict(trade_date, file_path=file_path, device=device, n_levels=n_levels)
         tensor_dict['trade_date'] = trade_date
         tensor_dict['share_symbol'] = share_symbol
         tensor_dicts.append(tensor_dict)
     return tensor_dicts
 
-def get_snapshot_tensor_dict(trade_date:str, ft_path: str, device, n_levels: int = 5):
-    df = pd.read_feather(ft_path)
+def get_snapshot_tensor_dict(trade_date:str, file_path: str, device, n_levels: int = 5):
+    df = pd.read_csv(file_path)
     df = df.rename(columns = {'Time':'UpdateTime', 'Match':'LastPrice'})
-    # df['Volume'] = df['Volume'].diff()
-    # df['Turnover'] = df['Turnover'].diff()
-    filter1 = df['UpdateTime'] >= 93000000 
-    filter2 = df['UpdateTime'] <= 113000000
-    filter3 = df['UpdateTime'] >= 130000000 
-    filter4 = df['UpdateTime'] <= 150000000 
-    df = df[(filter1 & filter2) | (filter3 & filter4)]
-    df = df.drop_duplicates()
 
     def get_tensor(ary):
         return torch.tensor(ary, dtype=torch.float32, device=device)
 
-    """找出超过3秒的时间间隔，并进行插值处理，将它们都转化为3秒的间隔。例如：6秒插值后变成两个3秒。9秒变三个3秒
-    Find time intervals exceeding 3 seconds, and perform interpolation to convert them to 3-second intervals. 
-    For example, inserting a value into 6 seconds of data results in two 3-second data intervals, 
-    and inserting two values into 9 seconds of data results in three 3-second intervals.
-    """
-    '''找出超过3秒的时间间隔
-    Find time intervals exceeding 3 seconds
-    '''
-    # df['UpdateTime'] = pd.to_datetime(df['UpdateTime'].apply(lambda x : f'{trade_date} {x}'), format='%Y%m%d %H%M%S%f')  # 将字符串转换为 Pandas 时间戳对象
-    # df['UpdateTime'] = df['UpdateTime'].apply(lambda x: x.timestamp())  # 将时间戳对象转换为 POSIX 时间戳（浮点数形式）
-    # time_stamp = df['UpdateTime'].values
-    # time_diffs = time_stamp[1:] - time_stamp[:-1]
-    time_diffs = df['UpdateTime'].diff().values[1:]
-
-    '''新建需要插值的所有row，更新 UpdateTime 用于排序
-    Create new rows for all data points requiring interpolation and update the UpdateTime for sorting purposes
-    '''
-    df_list = []
-    for i, time_diff in enumerate(time_diffs):
-        if 6 <= time_diff <= 1800:
-            for j in range(int(time_diff) // 3 - 1):
-                # df.loc[i, 'UpdateTime'] = df.loc[i, 'UpdateTime'] - j * 3
-                df_list.append(df.iloc[i])
-    '''有时候 收盘最后时刻的3秒快照没有更新，上面的for循环就无法补全需要插值的row，因此使用下面的代码补全'''
-    for j in range(4800 + 2 - len(df) - len(df_list)):
-        # df.loc[-1, 'UpdateTime'] = df.loc[-1, 'UpdateTime'] + j * 3 + 3
-        df_list.append(df.iloc[-1])
-    if len(df_list) > 0:
-        add_df = pd.concat(df_list, axis=1, ignore_index=True).T
-
-        '''重建 pd.concat 操作后 column 丢失的 dtype'''
-        for column in df.columns:
-            add_df[column] = add_df[column].astype(df[column].dtype)
-
-        '''通过concat添加到原本的df里，根据 UpdateTime 进行排序，完成插值
-        Add the new rows to the original dataframe using concat, 
-        and sort the dataframe based on UpdateTime to complete the interpolation
-        '''
-        df = pd.concat((df, add_df))
-        
-    df.sort_values('UpdateTime')
-    df.reset_index(drop=True)
     assert df.shape[0] == 4800 + 2
 
     """get data for building tensor_dict"""
@@ -196,14 +146,14 @@ def get_snapshot_tensor_dict(trade_date:str, ft_path: str, device, n_levels: int
     torch.nan_to_num_(value, nan=0)
 
     '''get last price'''
-    price = get_tensor(df['LastPrice'].ffill().values)  # last price
-    price[price == 0] = price[price > 0][-1]
+    last_price = get_tensor(df['LastPrice'].ffill().values)  # last price
+    last_price[last_price == 0] = last_price[last_price > 0][-1]
 
     '''fill nan in ask_prices and ask_volumes'''
     ask_prices = get_tensor(df[[f'AskPrice{i}' for i in range(1, n_levels + 1)]].values).T
     assert ask_prices.shape == (n_levels, len(df))
     for i in range(n_levels):
-        prev_price = ask_prices[i - 1] if i > 0 else price
+        prev_price = ask_prices[i - 1] if i > 0 else last_price
         ask_prices[i] = fill_zero_and_nan_with_tensor(ask_prices[i], prev_price + 0.01)
     ask_volumes = get_tensor(df[[f'AskVol{i}' for i in range(1, n_levels + 1)]].values).T
     torch.nan_to_num_(ask_volumes, nan=0)
@@ -212,12 +162,12 @@ def get_snapshot_tensor_dict(trade_date:str, ft_path: str, device, n_levels: int
     bid_prices = get_tensor(df[[f'BidPrice{i}' for i in range(1, n_levels + 1)]].values).T
     assert bid_prices.shape == (n_levels, len(df))
     for i in range(n_levels):
-        prev_price = bid_prices[i - 1] if i > 0 else price
+        prev_price = bid_prices[i - 1] if i > 0 else last_price
         bid_prices[i] = fill_zero_and_nan_with_tensor(bid_prices[i], prev_price - 0.01)
     bid_volumes = get_tensor(df[[f'BidVol{i}' for i in range(1, n_levels + 1)]].values).T
     torch.nan_to_num_(bid_volumes, nan=0)
 
-    return {'price': price, 'volume': volume, 'value': value,
+    return {'last_price': last_price, 'volume': volume, 'value': value,
             'ask_prices': ask_prices, 'ask_volumes': ask_volumes,
             'bid_prices': bid_prices, 'bid_volumes': bid_volumes}
 

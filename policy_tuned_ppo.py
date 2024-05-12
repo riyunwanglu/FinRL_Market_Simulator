@@ -2,7 +2,7 @@
 Tuned PPO algorithm for optimized trade execution
 """
 
-from env_v2 import make_env
+from env import make_env
 from storage import RolloutStorage
 from constants import CODE_LIST, JUNE_DATE_LIST, VALIDATION_DATE_LIST, VALIDATION_CODE_LIST
 

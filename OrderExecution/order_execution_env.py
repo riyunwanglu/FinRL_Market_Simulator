@@ -55,9 +55,9 @@ class OrderExecutionVecEnv:
     """
 
     def __init__(self, num_envs: int = 4, gpu_id: int = 0, if_random=False,
-                 share_name: str = '000768_XSHE', beg_date: str = '2022-09-01', end_date: str = '2022-09-03', ):
+                 share_name: str = '000768.SZ', beg_date: str = '20220901', end_date: str = '20220903', ):
         self.if_random = if_random  # 设计随机的 reset，能让策略在更多样的state下学习，会提高策略泛化能力。
-        self.num_levels = 5  # 从10档行情中，选出 n_levels 个档位 用于仿真
+        self.num_levels = 10  # 从10档行情中，选出 n_levels 个档位 用于仿真
         self.price_scale = 25  # 策略网络输出的第一个动作特征，是订单的卖出价格与上一时刻的变化量，表示30个档位
         self.volume_scale = 1e-2  # 自动设置订单执行任务里，需要被执行的订单的数量，是成交量的 volume_scale 倍
         self.executed_scale = 2e-2  # last_price 里，订单的成交比率
@@ -76,7 +76,7 @@ class OrderExecutionVecEnv:
         self.share_name = share_name  # 当前被随机抽取出来的股票的名字
         self.cumulative_returns = torch.zeros(0)  # 赋值为 torch.zeros(0) 这个空张量，是有意强调他们是张量，而不是None
 
-        self.price = torch.zeros(0)
+        self.last_price = torch.zeros(0)
         self.volume = torch.zeros(0)
         self.ask_prices = torch.zeros(0)  # indices=[1, max_level] 各个级别的成交价
         self.bid_prices = torch.zeros(0)  # indices=[1, max_level] 各个级别的成交价
@@ -133,7 +133,7 @@ class OrderExecutionVecEnv:
         data_dict = self.get_data_dict()
         self.max_len = data_dict['max_len']
         self.volume = data_dict['volume'].to(self.device)
-        self.price = data_dict['last_price'].to(self.device)
+        self.last_price = data_dict['last_price'].to(self.device)
         self.ask_prices = data_dict['ask_prices'].to(self.device)
         self.bid_prices = data_dict['bid_prices'].to(self.device)
         self.ask_volumes = data_dict['ask_volumes'].to(self.device)
@@ -181,7 +181,7 @@ class OrderExecutionVecEnv:
         '''executed in next step'''
         if not done:
             self.inplace_cash_quantity(self.cash, curr_quantity, curr_price,
-                                       self.price[self.t + 1], self.volume[self.t + 1] * self.executed_scale)
+                                       self.last_price[self.t + 1], self.volume[self.t + 1] * self.executed_scale)
 
         '''update remain_quantity'''
         diff_quantity = curr_quantity - prev_quantity
@@ -194,7 +194,7 @@ class OrderExecutionVecEnv:
 
         # state = self.reset() if done else self.get_state()  # after self.t += 1
         if done:
-            self.cumulative_returns = total_asset / (self.total_quantity * self.price.mean()) * 100  # 100%
+            self.cumulative_returns = total_asset / (self.total_quantity * self.last_price.mean()) * 100  # 100%
             n_state = self.reset()
         else:
             state = self.get_state()
@@ -209,7 +209,7 @@ class OrderExecutionVecEnv:
         return self._get_state(self.remain_quantity / self.total_quantity,
                                self.quantity / self.total_quantity,
                                self.get_tensor(1 - self.t / self.max_len),  # remain_step_rate
-                               self.price[self.t] * 2 ** -3,
+                               self.last_price[self.t] * 2 ** -3,
                                self.tech_factors[self.t])
 
     def get_n_state(self):
@@ -220,7 +220,7 @@ class OrderExecutionVecEnv:
 
     def get_curr_price(self, action_price):
         delta_price = action_price * (self.price_scale * 0.01)
-        return self.price[self.t - 1] + delta_price  # after self.t += 1
+        return self.last_price[self.t - 1] + delta_price  # after self.t += 1
 
     def get_curr_quantity(self, action_quantity):
         quantity_ratio = action_quantity + 1
@@ -311,21 +311,21 @@ class OrderExecutionVecEnv:
             ask_prices = share_dict['ask_prices']  # 各个级别的成交量
             bid_prices = share_dict['bid_prices']  # 各个级别的成交量
             volume = share_dict['volume']  # delta volume 成交的订单数量
-            price = share_dict['price']  # last price 最后成交价格
+            last_price = share_dict['last_price']  # last price 最后成交价格
             value = share_dict['value']  # delta value 成交金额总量，换手额度
 
-            tech_factors = self.get_tech_factors(volume, price, value,
+            tech_factors = self.get_tech_factors(volume, last_price, value,
                                                  ask_prices, ask_volumes,
                                                  bid_prices, bid_volumes)
 
             # 先保存到内存里，reset的时候才加载到GPU
             data_dict = {
                 'share_name': share_name,
-                'max_len': price.shape[0] - 1,
+                'max_len': last_price.shape[0] - 1,
                 'total_quantity': volume.sum(),
 
                 'volume': volume,
-                'last_price': price,
+                'last_price': last_price,
                 'ask_prices': ask_prices,
                 'bid_prices': bid_prices,
                 'ask_volumes': ask_volumes,
@@ -338,7 +338,7 @@ class OrderExecutionVecEnv:
 
 class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
     def __init__(self, num_envs: int = 4, gpu_id: int = 0, if_random=False,
-                 share_name: str = '000768_XSHE', beg_date: str = '2022-09-01', end_date: str = '2022-09-03', ):
+                 share_name: str = '000768.SZ', beg_date: str = '20220901', end_date: str = '20220903', ):
         self.exec_level = 16  # 把聚合后的价格分为 exec_level 个档位
         self.num_cluster = 20  # 把num_cluster 个快照聚合成一个，一个快照约3秒，那么 3秒*20=60秒
         self.price_scale = 25  # 策略网络输出的第一个动作特征，是订单的卖出价格与上一时刻的变化量，表示30个档位
@@ -362,7 +362,7 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
         self.max_len = data_dict['max_len']
         self.prices = data_dict['prices'].to(self.device)
         self.volumes = data_dict['volumes'].to(self.device)
-        self.price = data_dict['price'].to(self.device)
+        self.price = data_dict['last_price'].to(self.device)
         self.volume = data_dict['volume'].to(self.device)
         self.tech_factors = data_dict['tech_factors'].to(self.device)
 
@@ -441,8 +441,8 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
                               beg_date='2022-09-01',
                               end_date='2022-09-30'):
         # assert share_name in {'000768_XSHE', '000685_XSHE'}
-        share_dir = f"{data_dir}/{share_name}"
-        share_dicts = get_share_dicts_by_day(share_dir=share_dir, share_symbol=share_name,
+        # share_dir = f"{data_dir}/{share_name}"
+        share_dicts = get_share_dicts_by_day(share_dir=data_dir, share_symbol=share_name,
                                              beg_date=beg_date, end_date=end_date,
                                              n_levels=self.num_levels, device=self.device)
         for share_dict in share_dicts:
@@ -454,13 +454,13 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
         print('| OrderExecutionEnv data pre processing:', share_name)
 
         for i, share_dict in enumerate(share_dicts):
-            share_name = share_dict['share_name']
+            # share_name = share_dict['share_name']
             trade_date = share_dict['trade_date']
             print(end=f'{trade_date}  ')
             print() if i % 8 == 7 else None
 
             # 对这些订单流数据进行处理
-            price = share_dict['price']  # last price 最后成交价格
+            last_price = share_dict['last_price']  # last price 最后成交价格
             value = share_dict['value']  # delta value 成交金额总量，换手额度
             volume = share_dict['volume']  # delta volume 成交的订单数量
             ask_prices = share_dict['ask_prices']  # 各个级别的成交量
@@ -472,9 +472,9 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
             prices, volumes = self.tick_to_minute_data(volume=volume, value=value)
 
             '''进行聚合'''
-            n_step = price.shape[0] // self.num_cluster
+            n_step = last_price.shape[0] // self.num_cluster
             # 进行聚合
-            price = price[:n_step * self.num_cluster].reshape((n_step, self.num_cluster)).mean(dim=1)
+            last_price = last_price[:n_step * self.num_cluster].reshape((n_step, self.num_cluster)).mean(dim=1)
             value = value[:n_step * self.num_cluster].reshape((n_step, self.num_cluster)).sum(dim=1)
             volume = volume[:n_step * self.num_cluster].reshape((n_step, self.num_cluster)).sum(dim=1)
             ask_prices = ask_prices[:, 0:n_step * self.num_cluster:self.num_cluster]
@@ -482,17 +482,17 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
             ask_volumes = ask_volumes[:, 0:n_step * self.num_cluster:self.num_cluster]
             bid_volumes = bid_volumes[:, 0:n_step * self.num_cluster:self.num_cluster]
 
-            tech_factors = self.get_tech_factors(volume, price, value,
+            tech_factors = self.get_tech_factors(volume, last_price, value,
                                                  ask_prices, ask_volumes,
                                                  bid_prices, bid_volumes)
 
             # 先保存到内存里，reset的时候才加载到GPU
             data_dict = {
                 'share_name': share_name,
-                'max_len': price.shape[0] - 1,
+                'max_len': last_price.shape[0] - 1,
                 'total_quantity': volume.sum(),
 
-                'price': price,
+                'last_price': last_price,
                 'volume': volume,
                 'prices': prices,
                 'volumes': volumes,
@@ -506,7 +506,7 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
             j = max(0, i - 1)
             prev_dict = data_dicts[j]
 
-            prev_price = prev_dict['price']
+            prev_price = prev_dict['last_price']
             prev_price_rate = prev_price / prev_price.mean()
 
             prev_volume = prev_dict['volume']
@@ -611,7 +611,7 @@ class OrderExecutionMinuteVecEnv(OrderExecutionVecEnv):
 
 class OrderExecutionVecEnvForEval(OrderExecutionVecEnv):
     def __init__(self, num_envs: int = 4, gpu_id: int = 0, if_random=False,
-                 beg_date: str = '2022-09-01', end_date: str = '2022-09-03', share_name='000685_XSHE'):
+                 beg_date: str = '20220901', end_date: str = '20220903', share_name='000768.SZ'):
         OrderExecutionVecEnv.__init__(self, num_envs=num_envs, gpu_id=gpu_id, if_random=if_random,
                                       beg_date=beg_date, end_date=end_date, share_name=share_name)
 
@@ -687,15 +687,15 @@ def get_ts_trends(ten, win_size=6, gap_size=6):
 
 
 def check_with_twap():
-    num_envs = 2
-    share_name = ['000768_XSHE', '000685_XSHE'][0]
-    beg_date = '2022-09-01'
-    end_date = '2022-09-01'
+    num_envs = 1
+    share_name = '000768.SZ'
+    beg_date = '20220901'
+    end_date = '20220901'
 
-    # env = OrderExecutionVecEnv(num_envs=num_envs, gpu_id=0, if_random=False,
-    #                            share_name=share_name, beg_date=beg_date, end_date=end_date)
-    env = OrderExecutionMinuteVecEnv(num_envs=num_envs, gpu_id=0, if_random=False,
-                                     share_name=share_name, beg_date=beg_date, end_date=end_date)
+    env = OrderExecutionVecEnv(num_envs=num_envs, gpu_id=0, if_random=False,
+                               share_name=share_name, beg_date=beg_date, end_date=end_date)
+    # env = OrderExecutionMinuteVecEnv(num_envs=num_envs, gpu_id=0, if_random=False,
+    #                                  share_name=share_name, beg_date=beg_date, end_date=end_date)
     env.reset()
 
     action = torch.zeros((num_envs, env.action_dim), dtype=torch.float32, device=env.device)
@@ -706,6 +706,7 @@ def check_with_twap():
     for i in range(env.max_step):
         state, reward, done, _ = env.step(action)
         cumulative_rewards += reward
+        # print(f'cur: {i}')
 
         if i % 64 == 0:
             env_cumulative_rewards = env.total_asset / env.total_quantity
@@ -727,7 +728,7 @@ def run1201():  # plot
 
     num_envs = 4
 
-    env = OrderExecutionVecEnv(num_envs=num_envs, beg_date='2022-09-14', end_date='2022-09-14')
+    env = OrderExecutionVecEnv(num_envs=num_envs, beg_date='20220914', end_date='20220914')
     env.if_random = False
     env.reset()
 
@@ -756,7 +757,7 @@ def run1201():  # plot
         ary_cum_returns.append((env.total_asset / env.total_quantity).tolist())
         ary_cash.append(env.cash.tolist())
 
-        ary_last_price.append(env.price[env.t].tolist())
+        ary_last_price.append(env.last_price[env.t].tolist())
 
     ary_remain_quantity = np.array(ary_remain_quantity)
     ary_cum_returns = np.array(ary_cum_returns)
@@ -766,11 +767,12 @@ def run1201():  # plot
 
     for env_i in range(1, num_envs):
         # plt.plot(ary_remain_quantity[:, env_i])
-        # plt.plot(ary_cum_returns[:, env_i])
+        plt.plot(ary_cum_returns[:, env_i], label=f'cum_returns {env_i}')
         # plt.plot(ary_cash[:, env_i])
         pass
 
     plt.plot(ary_last_price)
+    plt.legend()
     plt.grid()
     plt.show()
 
@@ -780,3 +782,4 @@ def run1201():  # plot
 
 if __name__ == '__main__':
     check_with_twap()
+    # run1201()
